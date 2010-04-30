@@ -1,0 +1,22 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN" "http://www.oasis-open.org/docbook/xml/4.2/docbookx.dtd">
+<!-- <!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook XML V4.2//EN" "/usr/local/share/xml/docbook/4.2/docbookx.dtd"> -->
+<!--
+
+         See http://docbook.org/ for Docbook: The Definitive Guide
+         for a great guide to Docbook formatting
+
+-->
+<book>
+<bookinfo>
+  <title>Zimmel Users Guide</title>
+  <author><firstname>Brian</firstname><surname>Candler</surname></author>
+  <copyright><year>2004</year><holder>Brian Candler</holder></copyright>
+</bookinfo>
+<!-- <preface><title>Foreword</title> ... </preface> -->
+
+<chapter>
+<title>...</title>
+<para>...</para>
+</chapter>
+</book>

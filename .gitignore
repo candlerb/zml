@@ -1,0 +1,7 @@
+*~
+*.orig
+doc
+junk
+coverage
+.svn
+.irbrc

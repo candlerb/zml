@@ -1,0 +1,60 @@
+What's the application for all this? Or - why bother?
+=====================================================
+
+I am thinking along the lines of a hierarchical application such as follows.
+
+      . (root)
+     /|\
+  resellers
+     /|\
+    VISPS
+     /|\
+    Users
+     /|\
+  Services
+
+There are a number of resellers in the system, each of which has a number of
+VISPs, each of which has a number of users, each of which has a number of
+services (say mailboxes or RADIUS accounts)
+
+This forms a very natural tree structure; XML is ideal for migrating
+accounts into an out of such as system.
+
+If a reseller or VISP logs in to their particular point in the tree, and
+asks to see all E-mail accounts starting with 'brian', then they should only
+see matches which are within their part of the tree. In terms of xpath:
+
+     /reseller[@name="acme"]//mailbox[@addr="brian%"]
+
+(brian% isn't valid xpath; I'd need to lookup the correct way of expressing
+that). But equivalently in SQL:
+
+     select ... from elements e, attributes a
+        where e.path like '3%' and e.tag=4
+         and e.path = a.path and a.attr=7 and a.value like 'brian%';
+
+(assuming the path to this reseller is '3'). This should be a reasonally
+efficient query; the SQL optimiser can decide for itself whether it would be
+better to find all attributes @addr like 'brian%', and work backwards to
+filter out accounts under a different reseller, or whether to enumerate all
+elements under the reseller and find E-mail accounts matching 'brian%'
+
+Some hand optimisation may help too:
+
+    select ... from attributes a
+       where a.path like '3%' and a.attr=7 and a.value like 'brian%'
+
+(and then filter on matches so that items which are not mailboxes, i.e.
+e.tag != 4, are ignored)
+
+You could do all the above using four tables (resellers, visps, users,
+services) and joining between them. But the above structure becomes much
+more powerful when you allow recursion: Users can own VISPS, who own Users,
+who own VISPS ... the reseller distinction can be removed, and a reseller
+just becomes another user.
+
+Any particular user / VISP needs to be able to see only the accounts which
+are below them in the tree, and the ZML structure allows this nicely.
+
+This structure is convenient for browsing - users can see which services are
+attached to them, VISPS can see which users are attached to them, and so on.

@@ -1,0 +1,57 @@
+#!/usr/local/bin/ruby -w
+
+if FileTest.exists?(ENV['HOME']+'/.zmlconf.rb')
+  require ENV['HOME']+'/.zmlconf'
+elsif FileTest.exists?('/etc/zmlconf.rb')
+  require '/etc/zmlconf'
+end
+
+require 'zml/cmdutil'
+require 'zml/sql/initdb'
+
+opt = ZML::Command::parse_options(
+	[ "--createdb", "-c", GetoptLong::NO_ARGUMENT ]
+)
+
+if opt[:help]
+  STDERR.puts 'Usage: zml_initdb [--createdb] [dbi:foo:bar [username [passwd]]]'
+  exit
+end
+
+$mgrdb = ARGV[3..5]
+$mgrdb ||= [] if opt[:createdb]
+
+DEFAULT_MGR = {
+	'dbi:pg' => ['dbi:pg:template1','pgsql',''],
+	'dbi:mysql' => ['dbi:mysql:mysql','root',''],
+}
+
+$zmldb[0].downcase =~ /\A([^:]+:[^:]+)/
+if $1 != 'dbi:sqlite' and $mgrdb
+  default = DEFAULT_MGR[$1] || [$zmldb[0],'','']
+  unless $mgrdb[0]
+    print "Administrator database [#{default[0]}]: "
+    $mgrdb[0] = STDIN.gets.chomp
+    $mgrdb[0] = default[0] if $mgrdb[0] == ''
+  end
+  unless $mgrdb[1]
+    print "Administrator username [#{default[1]}]: "
+    $mgrdb[1] = STDIN.gets.chomp
+    $mgrdb[1] = default[1] if $mgrdb[1] == ''
+  end
+  unless $mgrdb[2]
+    print "Administrator password [#{default[2]}]: "
+    $mgrdb[2] = STDIN.gets.chomp
+    $mgrdb[2] = default[2] if $mgrdb[2] == ''
+  end
+end
+
+ZML::Command::final_confirmation(opt)
+
+STDERR.puts "Initialising #{$zmldb[0]}" unless opt[:quiet]
+if $mgrdb and $zmldb[3] and $zmldb[3]['zmlsqltrace']
+  $mgrdb[3] ||= {}
+  $mgrdb[3]['zmlsqltrace'] = true
+end
+ZML::SQL::initdb($zmldb, $mgrdb)
+STDERR.puts "Done" unless opt[:quiet]

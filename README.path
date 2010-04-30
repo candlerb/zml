@@ -1,0 +1,623 @@
+This document discusses some of the design decisions and alternatives
+surrounding the choice of PATH.
+
+I consider three main alternatives for the problem of determining the
+immediate children of a node, and at the bottom of this document list the
+main components of an XPATH query and how they would map to SQL in each
+case.
+
+What format should we use for the PATH?
+---------------------------------------
+
+- needs to be compact enough to allow reasonably deep nesting of documents
+  without too much storage overhead
+- needs to allow common xpath queries to be represented as SQL
+- should generate elements and their children in the correct topological
+  sequence just using a SQL SORT
+
+Logically, the path is of the form
+   /n1/n2/n3/...
+where n1 is 0,1,2... for the first,second,third... child of the root
+      n2 is 0,1,2... for the first,second,third... next level child etc
+
+Compacted path
+--------------
+
+I have chosen a compact representation of the child index n1,n2,n3 using
+base32 digits d, where d is 0-9 or A-V (A-V indicate values 10-31)
+	d		0 - 31
+	Wdd		32 - 2^10-1
+	Xdddd		2^10 - 2^20-1
+	Ydddddd		2^20 - 2^30-1
+	Zdddddddd	2^30 - 2^40-1
+
+[Note: I'm not using RFC3548 base32 encoding, because they did it a stupid
+way round which doesn't sort correctly for our purposes]
+
+This format generates a sorted sequence of elements in the correct order
+(parent comes before all children), and can be decomposed by simple
+inspection: e.g.
+
+	4AWVUP	->	4 A WVU P	-> /4/10/1022/25
+
+Why not base64? Well, some SQL databases have a case-sensitive 'like'
+operator (e.g. Oracle); some are case-insensitive (e.g. Sqlite). Some have
+both. However if we used both upper and lower case letters for our paths, we
+would *have* to have case-insensitive matching, case-insensitive sorting,
+and so on.
+
+Actually, we can avoid the 'like' operator by using 'between' or '>=' and
+'<', but for now I'm happier as it is. Using base64 encoding would reduce
+the path lengths in some cases, but not by much.
+
+Using the path
+--------------
+
+Finding all the descendants of node with path 'ABCD' is simple, and can be
+done in several ways:
+
+	path like 'ABCD%' and path != 'ABCD'
+or
+	path like 'ABCD_%'
+or
+	path > 'ABCD' and path < 'ABCE'
+or
+	path > 'ABCD' and path < 'ABCDZW' 
+	-- ZW is effectively 'infinity' in our scheme, where ZVVVVVVVV is
+	   the largest usable value
+or
+	path between 'ABCD0' and 'ABCDZW'
+
+This last one is probably the best, as it is a single operator. Using the
+'ZW' value for infinity lets us compose these expressions in a join:
+
+	select ...
+	where e2.path between concat(e1.path,'0') and concat(e1.path,'ZW')
+
+However, finding all the *immediate* children of node 'ABCD' is not so
+simple. Using pattern matching on the path is nasty and likely to be very
+inefficient:
+
+	path like 'ABCD_'
+	or path like 'ABCDW__'
+	or path like 'ABCDX____'
+	or path like 'ABCDY______'
+	or path like 'ABCDZ________'
+
+So we need a way to make these queries efficient. There are three main
+contenders:
+
+(1) In every node, store both 'path' and 'parent' (where 'parent' is the
+path of the parent node). e.g.
+
+ path     parent
++--------+--------+
+| 4AWVUP | 4AWVU  |
+| ABC    | AB     |
+| ABCD   | ABC    |
++--------+--------+
+
+Then, finding immediate descendants is just a case of
+
+	parent='ABCD'
+
+Clearly we want to index on (parent); in practice it's useful to index on
+(parent,tag) as that also lets us find all children of one particular
+element type quickly.
+
+This is simple to use in a join:
+
+	select ... from elements e1, elements e2 where
+	... e1 conditions ...
+	and e1.path = e2.parent             -- e2 are children of e1
+	and ... e2 conditions ...
+
+This should give the SQL query optimiser quite a bit of freedom. It can
+estimate the number of elements which match the e1 condition, the number
+which match the e2 condition, and work either downwards from e1 to its
+children, or upwards from e2 to its parents.
+
+This option also has the useful side benefit that referential integrity
+checking can be enforced in the database so that each 'parent' points to a
+valid 'path' row.
+
+(2) In every node, store a 'depth' which is the number of elements in the
+path. e.g.
+
+ path     depth
++--------+--------+
+| 4AWVUP | 4      |    -- <4> <A> <WVU> <P>
+| ABC    | 3      |    -- <A> <B> <C>
+| ABCD   | 4      |    -- <A> <B> <C> <D>
++--------+--------+
+
+Then, we can do queries like
+
+	path between 'ABCD' and 'ABCDZW' and depth=5
+
+That query should work efficiently if we have an index on (depth,path)
+
+It is more difficult to use in a join though:
+
+	select ... from elements e1, elements e2 where
+	... e1 conditions ...
+	and e2.path between e1.path and concat(e1.path,'ZW')
+	and e2.depth = e1.depth+1
+	and ... e2 conditions ...
+
+It's almost certainly harder for the SQL query engine to do a good job of
+this.
+
+There is one case where it wins, and that's for searches a fixed number of
+node levels down, like
+	.//foo/*/*/*/bar
+
+	select ... from elements e1, elements e2 where
+	e1.tag = 'foo'
+	and e2.path between e1.path and concat(e1.path,'ZW')
+	and e2.depth = e1.depth+4
+	and e2.tag = 'bar'
+
+(3) In every node, store just the 'parent' and the child id: e.g.
+
+  parent   child
++--------+--------+
+| 4AWVU  | P      |  --> path 4AWVUP
+| AB     | C      |  --> path ABC
+| ABC    | D      |  --> path ABCD
++--------+--------+
+
+The actual path of each node is concat(parent,child) but is not stored
+separately.
+
+This is good for any query which requires the parent, but turns out to be
+clumsy in several common cases:
+
+-- select two nodes ABCD and EFGH
+	(parent='ABC' and child='D') or (parent='EFG' and child='H')
+
+-- descendant-or-self::node()
+	(parent between 'ABCD' and 'ABCDZW') or (parent='ABC' and child='D')
+
+and joins become even clumsier:
+
+	-- foo/bar
+	select from elements e1, elements e2 where
+	e1.tag = 'foo'
+	and e2.parent=concat(e1.parent,e1.child)
+	and e2.tag = 'bar'
+
+	-- foo//bar
+	select from elements e1, elements e2 where
+	e1.tag = 'foo'
+	and (e2.parent between concat(e1.parent,e1.child) and
+               concat(e1.parent,e1.child,'ZW')
+	     or (e2.parent=e1.parent and e2.child=e1.child))
+	and e2.tag = 'bar'
+
+Furthermore, although we can ensure that (parent,child) is unique, we can't
+have referential integrity checking for the 'parent' column (i.e. a way to
+check whether the value exists as concat(parent,child) of another row)
+
+Because disk space is cheap, and I feel it's important to be able to craft
+usable SQL queries by hand, I have decided to go for option (1). Since
+'depth' is cheap to calculate and store, though, I may in future add the
+ability to maintain this information within the database, and use it for
+joins of the form foo/*/*/*/bar
+
+(4) One other option I considered was to include the tag type within the
+path: e.g.
+
+(tagtype,childid,tagtype,childid,...)
+
+path   1A2B3C   child 'A' is tag type 1
+                child 'B' is tag type 2
+                child 'C' is tag type 3
+or
+
+path   A1B2C3   child 'A' is tag type 1
+                child 'B' is tag type 2
+                child 'C' is tag type 3
+
+It allows very efficient queries of the form
+
+	ancestor::foo
+
+because this can be done without reference to the database at all - just
+decompose the path and match ancestors of tag type 'foo'. However it gives
+very long paths. The first format also has the problem that elements read
+out of the database in SORT order are grouped by element type, not by the
+insertion order, which breaks usage for XML text documents.
+
+However, it turns out that this option also requires a 'depth' or 'parent'
+column, otherwise a query for child::node() becomes awful:
+
+	    path like 'ABCD__' or
+	    path like 'ABCD_W__' or
+	    path like 'ABCD_X____' or
+	    path like 'ABCD_Y______' or
+	    path like 'ABCD_Z________' or
+	    path like 'ABCDW___' or
+	    path like 'ABCDW__W__' or
+	    path like 'ABCDW__X____' or
+	    path like 'ABCDW__Y______' or
+	    path like 'ABCDW__Z________'		-- yuk!!
+
+*and* it requires a separate 'tag' column, because otherwise
+	.//foo
+becomes very difficult to do efficiently.
+
+Some sample XPATH queries and their SQL representations are given below.
+
+** HOWEVER **
+
+It could be very useful to include at least the type of the end element in
+the path - e.g. ABCD4 - because it allows referential integrity checking to
+say 'points to an element of tag FOO' (if you try to change its type then
+you change its path, and anything which pointed to it before no longer
+does so)
+
+(5) Another completely different option which was recently pointed out to me
+is here: http://www.ibase.ru/devinfo/DBMSTrees/sqltrees.html
+
+The problem with this is that an 'insert' operation requires renumbering all
+subsequent nodes in the DB; not good for the ISP-type environment where
+signups occur continuously, and also not good with replicated DB backends.
+Maybe there's a reasonable solution which involves pre-allocating space for
+children, and renumbering periodically. But for now I'll stick with my
+explicit paths.
+
+XPATH QUERIES
+=============
+
+Below I outline the main components of an XPATH query, and how they can be
+represented in SQL using solutions (1) to (3) above.
+
+Each intermediate step of an XPATH query is a nodeset (i.e. for ZML, a
+list of paths). So if each component takes a nodeset as its input, and
+generates a nodeset as its output, they can easily be combined:
+
+select .... from elements e1, elements e2, elements e3 where
+   ... conditions on e1 ...
+   ... conditions on e2 ...    -- referring to e1.path as input nodeset
+   ... conditions on e3 ...    -- referring to e2.path as input nodeset
+
+In the case where the nodeset is a constant, then this can be inlined. e.g.
+
+    sysid("ABCD ABCF")/bar
+
+the output of the first node test is a constant, so it can be inlined as
+
+    e2.parent in ('ABCD','ABCF') and e2.tag=4
+
+rather than
+
+    e1.path in ('ABCD','ABCF') and
+    e2.parent = e1.path and e2.tag = 4
+
+
+Attributes
+----------
+
+Finding 'attribute::foo' or '@foo' is straightforward; given a nodeset
+(which is a list of paths), we just select entries in the attributes table
+which match the path(s) and have the attribute requested.
+
+	.//foo/@bar
+
+	select a.value from elements e1, attributes a
+	where e1.path between 'ABCD' and 'ABCDZW'    -- e.g. "." is here
+	and e1.path = a.path
+	and a.attrid = 99;
+
+Node tests
+----------
+These are straightforward to implement in SQL, using the values I chose
+for element tag ids.
+
+	node()				-- no test required
+	*				-- tag >=0 (unless subsequent
+					location steps imply child nodes,
+					in which case it can be ignored)
+	ncname:*			-- join to element_tags table and
+					check namespace
+	text()				-- tag = -1
+	comment()			-- tag = -2
+	processing-instruction()	-- tag = -3
+	processing-instruction("foo")
+
+Predicates
+----------
+
+"The node-set selected by the location step is the node-set that results
+from generating an initial node-set from the axis and node-test, and then
+filtering that node-set by each of the predicates in turn"
+
+Generating SQL to generate an intermediate node-set is explained above, and
+in most cases can be done directly in SQL (the main exception being the
+ancestor:: axis which requires the intermediate node-set to be decomposed; a
+SQL database with stored procedures could do this though!)
+
+Some predicates can be converted into SQL, but tends to use
+database-specific SQL:
+
+[3]
+[position()=3]
+	[reverse] order by path having rownum = 3;
+
+[last()]
+[position()=last()]
+	[[reverse]] order by path having rownum = 1;
+
+[@title]
+	where ...
+	a.path = e1.path and a.attrid=nn
+
+[@title="value"]
+	where ...
+	a.path = e1.path and a.attrid=nn and a.value='value'
+
+[@title and @heading]
+	where ...
+	a1.path = e1.path and a1.attrid=nn
+	and a2.path = e1.path and a2.attrid=nn
+
+It's worth writing this to be done in SQL for the common cases, but the
+general case requires the node-set to be post-processed. That is, the first
+part of the SQL is generated and executed; the node-set and attributes
+returned; the predicates filtered in Ruby; and then if there is more to the
+XPATH query, the resulting nodeset given as input to the next set of SQL.
+
+
+Sample XPATH queries for the options listed above
+-------------------------------------------------
+
+sysid("ABCD")	-- note, not a standard xpath function!
+
+	(1) path='ABCD'
+	(2) path='ABCD'
+	(3) parent='ABC' and child='D'
+
+sysid("ABCD EFGH")
+sysid("ABCD") | sysid("EFGH")
+
+	(1) path in ('ABCD','EFGH')
+	(2) path in ('ABCD','EFGH')
+	(3) (parent='ABC' and child='D') or (parent='EFG' and child='H')
+
+child::para
+para
+
+	(1) parent='ABCD' and tag=4
+	(2) path between 'ABCD' and 'ABCDZW' and depth=5 and tag=4
+	    -- note: without the 'depth' column you would have:
+	    (path like 'ABCD_' or path like 'ABCDW__' or path like 'ABCDX____'
+	    or path like 'ABCDY______' or path like 'ABCDZ________') and
+	    tag = 4
+	(3) parent='ABCD' and tag=4
+
+child::node()
+node()
+
+	(1) parent='ABCD'
+	(2) path between 'ABCD' and 'ABCDZW' and depth=5
+	(3) parent='ABCD'
+
+child::*
+*
+
+	Same as above but includes only element children (not text). So add:
+		tag >= 0
+	and ignore the 'content' column of any elements returned. If the
+	rest of the search implies children, e.g. child::*/child::foo
+	then you can drop the 'tag >= 0' test since we know that only
+	element nodes can have children.
+
+child::text()
+
+	Text nodes are standalone (tag=-1), or the first text child of an
+	element is included within the element row itself in the 'content'
+	column. So:
+		tag = -1 or (tag >= 0 and content is not null)
+
+descendant-or-self::node()
+//
+
+	(1) path like 'ABCD%'
+	(2) path like 'ABCD%'
+	(3) parent like 'ABCD%' or (parent='ABC' and child='D')
+
+	Alternatives which avoid the 'like' operator (perhaps more efficient
+	for some databases?)
+
+	path >= 'ABCD' and path < 'ABCE'
+
+	path between 'ABCD' and 'ABCDZW'
+
+	The second of these is nice because (a) it's a single operator, and
+	(b) it can easily be composed from a SQL join:
+
+	e2.path between e1.path and concat(e1.path,'ZW')
+
+	although in this case it's simpler to do
+
+	e2.path like concat('e1.path','%')
+
+descendant-or-self::para
+//para
+
+	(1) path like 'ABCD%' and tag=4
+	(2) same as (1)
+	(3) (parent like 'ABCD%' or (parent='ABC' and child='D')) and tag=4
+
+descendant::node()
+
+	(1) same as (2) or (3)
+	(2) path like 'ABCD%' and path != 'ABCD'
+	(2) path like 'ABCD_%'
+	(2) path > 'ABCD' and path < 'ABCE'
+	(2) path between 'ABCD0' and 'ABCDZW'
+	(3) parent like 'ABCD%'
+	(3) parent >= 'ABCD' and parent < 'ABCE'
+	(3) parent between 'ABCD' and 'ABCDZW'
+
+descendant::para
+
+	(1) same as (2) or (3)
+	(2) path between 'ABCD0' and 'ABCDZW' and tag=4
+	(3) parent between 'ABCD' and 'ABCDZW' and tag=4
+
+ancestor-or-self::node()
+ancestor-or-self::*		-- since ancestors must be elements
+
+	This is done by directly decomposing the path:
+	ABCD, ABC, AB, A, ""
+	This can't be done in SQL, so any query of this type
+			foo/ancestor-or-self::*/bar
+	must first return an intermediate node-set for 'foo' and then be
+	processed off-line
+
+	[Actually, in option (1) where we have both parent and path columns,
+	it is possible to do a tree-search query in Oracle to find all the
+	ancestors of a node. However we want to work with non-Oracle
+	databases as well!]
+
+ancestor-or-self::para
+
+	(1) path in ('ABCD','ABC','AB','A','') where tag=4
+	(2) same as (1)
+	(3) (((parent='ABC' and child='D') or (parent='AB' and child='C')
+	    or (parent='A' and child='B') or (parent='' and child='A')
+	    or (parent is null and child='')) and tag=4
+
+ancestor::node()
+ancestor::*
+ancestor::para
+
+	Same as above, but excluding the self node
+
+parent::
+
+	Same as above, just including the parent node
+
+self::node()
+.
+
+	Nodeset passed through unchanged
+
+self::*
+
+	... and tag >= 0  (unless the query implies we must be talking
+            about further children, in which case this is not needed)
+
+self::para
+
+	... and tag = 4
+
+child::node()/child::para
+child::*/child::para	-- because if it has a child, it must be a node()
+*/para
+
+	We need to do a join. Taking the simplest case of a parent-child
+	join first:
+
+	(1) select e2.path from elements e1, elements e2 where
+	    e1.parent='ABCD' and e2.parent=e1.path and e2.tag=4
+
+	and:
+	
+	(3) select e2.parent, e2.child from elements e1, elements e2 where
+	    e1.parent='ABCD' and e2.parent=concat(e1.parent,e1.child)
+	    and e2.tag=4
+	-- gives less opportunity for the SQL query optimiser to work
+
+	Similar logic gives us in the case where we have (path,depth)
+	rather than (parent):
+
+	(2) select e2.path from elements e1, elements e2 where
+	    e1.path between 'ABCD' and 'ABCDZW' and e1.depth=5
+	    and e2.path between (e1.path and concat(e1.path,'ZW')) and
+	    e2.depth=e1.depth+1 and e2.tag=4
+	-- not good for SQL query optimiser
+
+	however in this case, child::* can be optimised out completely:
+	    select path from elements where
+	    path between 'ABCD' and 'ABCDZW' and depth=6 and tag=4
+
+descendant::para/child::em
+
+	(1) e1.path between 'ABCD0' and 'ABCDZW' and e1.tag=4 and
+	    e2.parent=e1.path and e2.tag=7
+
+	(2) select e2.path from elements e1, elements e2 where
+	    e1.path between 'ABCD0' and 'ABCDZW' and e1.tag=4 and
+	    e2.path between e1.path and concat(e1.path,'ZW') and
+	    e2.depth = e1.depth+1 and e2.tag=7
+
+	(3) e1.parent between 'ABCD' and 'ABCDZW' and e1.tag=4 and
+	    e2.parent=concat(e1.parent,e1.child) and e2.tag=7
+
+para/*/*/*/em
+
+	This is the case where having a 'depth' field makes life efficient,
+	if we can generate the correct query.
+
+	(1) select e5.path from elements e1, elements e2, elements e3,
+		elements e4, elements e5 where
+	    e1.parent='ABCD' and e1.tag=4 and
+	    e1.path=e2.parent and
+	    e2.path=e3.parent and
+	    e3.path=e4.parent and
+	    e4.path=e5.parent and e5.tag=7
+	-- may not be efficient unless there are few 'para' children of
+	the context node, or few 'em' elements anywhere in the document
+	(2) select e2.path from elements e1, elements e2 where
+	    e1.path between 'ABCD' and 'ABCDZW' and e1.depth=5 and e1.tag=4
+	    and e2.path between e1.path and concat(e1.path,'ZW')
+	    and e2.depth = e1.depth+4
+	(3) replace 'en.path' with 'concat(en.parent,en.child)' in (1)
+
+/
+
+	Set the nodeset to the root of the document, which can be done by
+	decomposing the path and keeping just the first element, e.g. 'A'
+
+following::
+
+	(1) path >= 'ABCE'
+	(1) path > 'ABCDZW'	-- better for composing SQL joins
+	(2) path >= 'ABCE'
+	(2) path > 'ABCDZW'
+	(3) parent > 'ABC' or (parent = 'ABC' and child > 'D')
+
+	'composing SQL joins' means where the context node is part of a
+	join, e.g.
+	... where e2.path > concat(e1.path,'ZW')
+
+	Otherwise we'd have to take an intermediate node set, modify it,
+	and start a new query.
+
+preceding::
+
+	(1) path < 'ABCD' and path not in (.., .., ..)  -- exclude ancestors
+	(2) like (1)
+	(3) parent < 'ABC' or (parent = 'ABC' and child < 'D') and
+	    path not in (.., .., ..)
+	(4) like (1)
+
+	Note that this requires us to take the intermediate nodeset,
+	evaluate the ancestors, and generate a new query
+
+preceding-sibling::
+
+	(1) parent = 'ABC' and path < 'ABCD'
+	(2) path between 'ABC' and 'ABCCZW' and depth=4
+	(3) parent = 'ABC' and child < 'D'
+
+
+following-sibling::
+
+	(1) parent = 'ABC' and path > 'ABCD'
+	(2) path between 'ABCE' and 'ABCZW' and depth=4
+	(3) parent = 'ABC' and child > 'D'
+

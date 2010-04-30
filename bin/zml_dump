@@ -1,0 +1,25 @@
+#!/usr/local/bin/ruby -w
+
+if FileTest.exists?(ENV['HOME']+'/.zmlconf.rb')
+  require ENV['HOME']+'/.zmlconf'
+elsif FileTest.exists?('/etc/zmlconf.rb')
+  require '/etc/zmlconf'
+end
+
+require 'zml/cmdutil'
+require 'zml/database'
+
+opt = ZML::Command::parse_options
+
+if opt[:help]
+  STDERR.puts 'Usage: zml_dump [-f filename] [dbi:foo:bar [username [passwd]]]'
+  exit
+end
+
+out = $stdout
+out = File.open(opt[:filename],'w') if opt[:filename]
+
+STDERR.puts "Connecting to #{$zmldb[0]}" unless opt[:quiet]
+
+@db = ZML::Database.connect(*$zmldb)
+@db.fetch_xml(out, opt[:path])

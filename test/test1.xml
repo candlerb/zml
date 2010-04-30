@@ -1,0 +1,5 @@
+<doc xml:space="preserve" attr="foo">
+  <one attr="bar" bing="boing"/>
+  <two attr="bar" bing="zog"/>
+  <three attr="baz" bing="bing"/>
+</doc>

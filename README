@@ -1,0 +1,169 @@
+WHAT IS ZML?
+============
+
+ZML (pronounced "Zimmel") is currently just a toy, a proof-of-concept (but
+it does actually run!) It allows you to store and retrieve native XML
+documents in a SQL database, retrieving either whole documents or just
+subtrees.
+
+Documentation is pretty much non-existent, apart from this file.
+
+HOW DOES IT WORK?
+=================
+
+(1) PATHS
+
+ZML keeps tables for elements and attributes, and ancilliary tables which
+map tag id to name, attribute id to name, and namespace id to URI.
+
+The vaguely clever bit is its use of a 'path' string as the primary key. An
+XML document is a tree, and the path is rather like the path used to
+traverse a filesystem tree (/dir1/dir2/...), but is actually stored as a
+compacted string value.
+
+                              filesystem   string
+
+   <root>                        /           ""
+     <child/>                    /0          "0"
+     <child>                     /1          "1"
+       <grandchild/>             /1/0        "10"
+       <grandchild/>             /1/1        "11"
+       <grandchild/>             /1/2        "12"
+     </child>
+   </child>
+
+The values 0-9 and A-V are used to represent child 0 to child 31. If a node
+has more than 32 children, longer values are used:
+
+     Wxx         32 to 2^10-1     (x = 0-9 or A-V)
+     Xxxxx       2^10 to 2^20-1
+     Yxxxxxx     2^20-1 to 2^30
+     Zxxxxxxxx   2^30 to 2^40-1
+
+Why go to this trouble? Well, several reasons. Firstly, you can locate all
+elements under node 123 just by saying "path like '123%'". Secondly, if you
+ORDER BY this field, then you get the nodes out in exactly the right order
+you need to regenerate the XML: every node preceeds its children.
+
+Hence, this system allows you to spool XML into and out of the database,
+without actually creating any intermediate representation of the tree in
+memory; document size is limited only by the storage capacity of your
+database. See for example bin/zml_dump and lib/zml/sql/sqltostream.rb for
+the code which does this.
+
+Furthermore, it should allow a large subset of XPATH queries to be mapped
+directly into SQL queries. See README.paths for a fuller description of why
+I choose this path structure, and how it can be used for XPATH.
+
+(2) ELEMENTS
+
+The elements table has a (unique) path, an element type, and some optional
+content.
+
+A leaf text node is the most common case, and is represented by a single row
+in the database containing both the tag and its content: <foo>hello</foo> at
+path 123 is
+
+	path	elem	content
+	----	----	-------
+	123	foo	"hello"
+
+(where 'foo' is actually an integer foreign key into the element_tags table,
+but I'll ignore that for now)
+
+<foo/> is the same, but the content is NULL.
+
+Nesting of elements is implied from the paths:
+
+	123	p	"hello "
+	1230	b	"world!"
+
+is:
+
+<p>hello <b>world!</b></p>
+
+There is a TEXT element for cases where text follows a child element:
+
+	123	p	"This is a "
+	1230	i	"concrete"
+	1231	TEXT	" example"
+
+<p>This is a <i>concrete</i> example</p>
+
+There are other elements for COMMENT and processing instructions.
+
+The element row also contains the number of the next child to be added. In
+effect, each element contains a 'sequence' for its children.
+
+(3) ATTRIBUTES
+
+are just held in an attributes table, indexed by the element path and the
+attribute id (which forces you to have no more than one instance of any
+particular attribute, as required by the XML spec)
+
+
+Quick start demonstration of command-line zml utilities
+=======================================================
+
+These examples assume you are using Sqlite as the backend. However, you
+should be able to use other DBI backends (tested with dbi:mysql, dbi:pg)
+
+(1) Create file ~/.zmlconf.rb which contains the path to the zml libraries;
+this is used by all the zml binaries, and means you don't actually have to
+install zml anywhere in the library search path.
+
+$ vi ~/.zmlconf.rb
+
+    # Set the path to the zml/lib directory here
+    $:.push "/home/brian/projects/zml/lib"
+    # You can also set a default ZML database if you wish:
+    #$zmldb = ['dbi:sqlite:/home/brian/projects/zml/test/mydb.db']
+
+(2) Use zml_initdb to create the tables
+
+$ cd test
+$ ../bin/zml_initdb dbi:sqlite:mydb.db
+
+(3) Replace the entire (empty) database with a root node, and dump it
+    back out
+
+$ ../bin/zml_restore -r -f root.xml dbi:sqlite:mydb.db
+Load complete, element path=""    <-- this is the root node
+
+$ ../bin/zml_dump dbi:sqlite:mydb.db
+
+(4) Add some more documents under the root
+
+$ ../bin/zml_restore -f test1.xml dbi:sqlite:mydb.db
+Load complete, element path="0"
+
+$ ../bin/zml_restore -f XMLSchema.xsd dbi:sqlite:mydb.db
+Load complete, element path="1"
+
+Note: Leading/trailing whitespace is not preserved in the element/document
+unless you set attribute xml:space='preserve'
+
+(5) You can dump the entire document tree, or individual documents
+
+$ ../bin/zml_dump dbi:sqlite:mydb.db          # whole database
+$ ../bin/zml_dump -p "0" dbi:sqlite:mydb.db   # just elements under path "0"
+$ ../bin/zml_dump -p "02" dbi:sqlite:mydb.db  # just elements under path "02"
+
+(6) Look at the data using SQL queries: e.g. to see the elements (with
+    their element ids mapped into names) under path "0" you can type
+
+$ sqlite mydb.db
+sqlite> select e.path, ns.prefix, et.tag, e.content from elements e
+   ...> left join element_tags et on e.elemid = et.elemid
+   ...> left join namespaces ns on et.nsid = ns.nsid
+   ...> where e.path like '0%' order by e.path;
+
+(6) Other options:
+
+zml_restore -p "path"     # add a new child element underneath node "path"
+zml_restore -r -p "path"  # *replace* node "path" with this data
+(path defaults to "", i.e. the root node)
+
+zml_dump can only select elements by path at the moment. The next big module
+is to convert XPATH queries into SQL, and do indexing of elements and
+attributes.

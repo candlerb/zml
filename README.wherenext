@@ -1,0 +1,114 @@
+Where to next? There's a huge amount of work which could be done.
+
+(0) Get rid of DBI. DBI is supposed to be database-independent, but I ended
+up having to write my own abstraction layer on top of it (DBIWrapper), so
+might as well just use the underlying database objects directly.
+
+(1) Implement XPATH to SQL query conversion (in principle doable, see
+README.path for more details)
+
+(2) Implement the ability to map certain elements into tables of their own;
+at this point it becomes rather similar to an object<->relational mapping
+system. Why do this?
+
+* To allow database constraints to be added, such as "all elements of
+  type <foo> have a unique value for attribute 'bar' and non-null 'baz'",
+  and indexing on individual attributes. This is quite important -
+  e.g. if we allow ISP domains to be inserted, we want to make sure that
+  the domain name is unique.
+
+* To allow direct and more familiar querying/updating of data, without
+  having to really understand the ZML tree structure
+
+* Faster retrieval: an object can be represented as a single row, rather
+  than one row in 'elements' plus a number of other rows in 'attributes'
+
+* People don't want all their business data squashed into two tables,
+  "elements" and "attributes"
+
+I have some ideas on how to implement this.
+
+(3) Validation - should we try to impose XML Schema or Relax validation on
+incoming inserts / updates? Probably not flexible enough. So maybe we should
+use Ruby code for each element type.
+
+(3A) Rather than making a separate Class for each element type, I was
+thinking about keeping each as an REXML::Element but then extending with a
+mixin (where the mixin is defined for each element type; also we can have a
+per-instance mixin for an individual element, like a singleton class in
+Ruby)
+
+(4) Implement an API for doing search/update/insert/delete operations on the
+database, ideally something like XMLRPC which is platform-neutral, so a Perl
+frontend can use a Ruby ZML backend (or a C backend, say, if it were
+rewritten)
+
+XML specs provide very little guidance for this. There was a working group
+on handling XML Fragments, but they dropped it.
+
+(5) Implement an access-control system on top of this, so that a user who
+comes into this API firstly authenticates to ZML, and in turn has
+restricted access to a certain part of the subtree, read/write permission to
+individual elements and attributes etc
+
+(6) A web-based browser on top of this API. You then have something rather
+like a CRM - login with your credentials, browse and update the database
+within whatever limits your account has
+
+(6A) A command-line shell on top of the same API
+
+(7) Sort out the issues of one element referencing another: how it's stored
+in the DB, and how it's serialised to XML in a useful form; and unique keys.
+
+- XML defines attributes of type 'ID' and 'IDREF', which are assigned by the
+user but are unique only within a particular _document_ and are optional on
+any particular element. Not sure how useful this is.
+
+- We could use the internally generated PATH to reference from one object to
+another (but there are problems, e.g. if we export an object and then
+re-import it into a different DB where a new path is allocated).
+
+Maybe the import would have to keep track of old->new path mappings (which
+fortunately may just be a case of changing path prefix from one thing to
+another). But it would be impossible for an XML fragment to reference
+something outside of itself in a way which was meaningful after the data had
+been imported into a different system.
+
+- Some elements may have an attribute which naturally forms its unique
+primary key - e.g. the username for a RADIUS service. So perhaps if one
+element references another, this unique key should be exposed instead.
+
+Consider a case where many ISP services reference the same domain, and we
+wish to export to XML:
+
+   <DOMAIN name="example.com"/>
+   ...
+   <MAILBOX localpart="alice" domain="example.com"/>
+   <MAILBOX localpart="bob" domain="example.com"/>
+
+From a Referential Integrity point of view we might want the reference to
+actually point to a path: but when we export we probably don't want to see
+
+   <DOMAIN name="example.com" path="A14V"/>
+   ..
+   <MAILBOX localpart="alice" domainref="A14V"/>
+   <MAILBOX localpart="bob" domainref="A14V"/>
+
+So if we use the path as the key *internally*, we may have to change it when
+exporting *externally*.
+
+However, in some cases we may have no choice but to expose the path, if the
+element we are referring to does not have an explicitly defined unique
+primary key attribute, or an ID value we can point at. (Or perhaps we don't
+allow references unless the target object has such an identifier).
+
+XML specs don't help us much here; it's possible to define using XML Schema
+that an attribute must be a reference to another attribute of another
+element, but I don't think I want to implement all of XML Schema just for
+that.
+
+What about IDs in two different documents? Suppose we have an XML document
+representing all our ISP users, and we decide to make a second copy of that
+document within the same ZML database as a backup or snapshot? Our
+uniqueness constraints will have to be disambiguated somehow so that their
+scope is within one document only.

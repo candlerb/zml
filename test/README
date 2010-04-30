@@ -1,0 +1,11 @@
+Run a full test suite as:
+
+ruby test_sqlite.rb
+ruby test_mysql.rb
+... etc, depending on which database backend you have available. Modify
+the parameters within this file as appropriate.
+
+Individual tests which don't use the database can be run separately as long
+as you put ../lib in the path, e.g.
+
+ruby -I../lib path.rb

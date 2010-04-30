@@ -1,0 +1,37 @@
+Identity
+--------
+http://www.w3.org/2001/tag/doc/xmlIDsemantics-32.html
+
+ The desire of some people to have new ID-like types that are, for example,
+ unique among elements of a give type, or unique in a particular namespace,
+ or unique in a given subtree, are also not addressed in this document
+ although it is appreciated that some of these new types would aid in
+ composability. In particular, wrapper formats such as SOAP encoding benefit
+ from having identifiers that are not in scope for the whole document, and
+ which are only unique among attributes of the same name, such as
+ soap-enc:id.
+
+    <<yep: we definitely want RADIUS logins not to conflict with POP3
+      logins, either because the elements are different, or the attributes
+      containing the username are different>>
+
+ Other limitations of existing XML IDness not addressed in this finding are
+ the restriction to alphanumeric keys (so id="42" is currently invalid), the
+ use of a string basetype (even without the XML NAME constraint, id="00042"
+ will not match idref="42"), or the restriction to single keys.
+
+    <<would be very helpful if the username could be the primary ID for
+      a RADIUS service>>
+
+This is a good summary. In addition, we have an additional identity value
+(the 'path'), which could be made to fit XML ID criteria just by prefixing
+with an alphanumeric character. It is unique across all documents stored
+within a ZML database, and allocated by ZML at insertion time; i.e. it
+cannot be chosen by the user, and in general it will be different if the
+same XML fragment is inserted in another ZML database. We can expose this to
+the user as a zml:path or zml:id attribute.
+
+Fragments
+---------
+An incomplete/abandoned standard is here:
+http://www.w3.org/TR/xml-fragment

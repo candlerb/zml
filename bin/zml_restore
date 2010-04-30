@@ -1,0 +1,30 @@
+#!/usr/local/bin/ruby -w
+
+if FileTest.exists?(ENV['HOME']+'/.zmlconf.rb')
+  require ENV['HOME']+'/.zmlconf'
+elsif FileTest.exists?('/etc/zmlconf.rb')
+  require '/etc/zmlconf'
+end
+
+require 'zml/cmdutil'
+require 'zml/database'
+
+opt = ZML::Command::parse_options(
+	[ '--replace', '-r', GetoptLong::NO_ARGUMENT ]
+)
+
+if opt[:help]
+  STDERR.puts 'Usage: zml_restore [-f filename] [-p path] [--replace] [dbi:foo:bar [username [passwd]]]'
+  exit
+end
+
+ZML::Command::final_confirmation(opt) if opt[:replace] and opt[:path].to_s == ""
+
+inp = $stdin
+inp = File.open(opt[:filename]) if opt[:filename]
+
+STDERR.puts "Connecting to #{$zmldb[0]}" unless opt[:quiet]
+
+@db = ZML::Database.connect(*$zmldb)
+res = @db.store_xml(inp, opt[:path], opt[:replace])
+STDERR.puts "Load complete, element path=#{res.inspect}" unless opt[:quiet]

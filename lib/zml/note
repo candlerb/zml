@@ -1,0 +1,19 @@
+  # A similar effect can be had by the SQL query:
+  # select e.path, ns.prefix, et.tag, e.content
+  #   from elements e
+  #   left join element_tags et on e.elemid = et.elemid
+  #   left join namespaces ns on et.nsid = ns.nsid
+  #   order by e.path;
+# QUESTION:
+# - are attributes element-specific? i.e. is a
+#   <foo:chapter title="foo">
+# different from a
+#   <bar:section title="foo"> ?
+# I am assuming that they are. Note that in both cases, 'title' is
+# not associated with any namespace, even though the enclosing element is,
+# or that there may be a default namespace in force.
+# So what about
+#   <chapter zml:wibble="true">
+#   <section zml:wibble="true">
+# are *those* two different attributes?
+

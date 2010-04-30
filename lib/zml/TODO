@@ -1,0 +1,53 @@
+- make constants for values like -1 (text) etc.
+- test cases for command-line zml_initdb / zml_restore / zml_dump
+
+- we need a zml:document type. It should have attributes of the xml encoding
+  and standalone declarations, or else a separate <?xml .. ?> child
+- exceptions
+- prettyprinting (respecting xml:space)
+- make a Path class and make it simpler
+- --showpath attribute to zml_dump (shows zml:path="xxx" on each element)
+- make processing instructions get their own negative tags:
+  -3 = <?php, -4 = <?foo etc. What about CDATA ? (xpath doesn't support it)
+- make new syntax for <!ATTLIST> etc. when nested within an XML document?
+
+Should we keep xmlns prefix->uri mappings within the database? When we
+output an element, can we avoid giving all possible namespaces, just by
+listing those on it and its ancestors?
+
+ELEMENT METADATA
+- mark as 'not mixed content' (xml:space?)
+- text content indexed
+- text content space-trimmed
+
+ATTRIBUTE METADATA
+- 'ID' attribute (default to xml:id if we don't know what it is; use
+  xml:attrId ?)
+- fixed columns in the elements table
+- indexed (maxlength, case-insensitive)
+
+
+- we want to protect the namespaces/element_tags/attr_tags tables against
+  rubbish being inserted; *queries* which reference unknown namespaces
+  should not generate them, only authorised insertions
+
+- a utility to clear out unrequired namespaces/elements/attributes
+
+- indexed attributes, unique attributes (and content?)
+
+- xpath searching/retrieval
+
+- insertion with schema validation and other application-level validation
+  hooks
+
+Other/defer
+-----------
+warning: instance variable @parent not initialized (REXML)
+
+Consider if it's possible to put element/attribute/namespace assignments
+in the database as XML, rather than separate tables
+--> do the simplest thing which can possibly work
+
+- fix_trailing_space should be stored within the database somewhere
+  (so upgrades to future mysql versions can preserve it)
+
